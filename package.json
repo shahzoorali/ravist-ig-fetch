@@ -1,0 +1,20 @@
+{
+  "name": "instagram-scraper-service",
+  "version": "1.0.0",
+  "description": "Self-hosted Instagram scraper service — replaces instagram-scraper-stable-api (RapidAPI)",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.3.1",
+    "morgan": "^1.10.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}
