@@ -62,22 +62,25 @@ const MOBILE_HEADERS = {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /**
- * Extracts the shortcode from any Instagram URL format:
+ * Extracts the identifier (shortcode or numeric ID) from any Instagram URL format:
  *   https://www.instagram.com/p/ABC123def/
- *   https://www.instagram.com/reel/ABC123def/?igsh=xxx
- *   https://instagram.com/reel/ABC123def
+ *   https://www.instagram.com/reel/ABC123def/
+ *   https://www.instagram.com/stories/username/123456789/
  */
 function extractShortcode(url) {
-  const match = url.match(/instagram\.com\/(?:p|reel|tv)\/([A-Za-z0-9_-]+)/);
-  if (!match) throw new Error(`Cannot extract shortcode from URL: ${url}`);
+  const match = url.match(/instagram\.com\/(?:p|reel|tv|stories\/[^/]+)\/([A-Za-z0-9_-]+)/);
+  if (!match) throw new Error(`Cannot extract identifier from URL: ${url}`);
   return match[1];
 }
 
 /**
  * Converts an Instagram shortcode to its numeric media ID.
  * Standard base-64 decode using Instagram's alphabet — stable algorithm.
+ * If input is already numeric (like a Story ID), returns it as-is.
  */
 function shortcodeToMediaId(shortcode) {
+  if (/^\d+$/.test(shortcode)) return shortcode;
+
   let id = BigInt(0);
   for (const char of shortcode) {
     const idx = SHORTCODE_ALPHABET.indexOf(char);
@@ -330,25 +333,28 @@ async function fetchViaOEmbed(instagramUrl) {
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 async function scrapePost(instagramUrl) {
-  const shortcode = extractShortcode(instagramUrl);
-  const errors    = [];
+  const identifier = extractShortcode(instagramUrl);
+  const isStory    = instagramUrl.includes('/stories/');
+  const errors     = [];
 
-  // ── Strategy 1: GQL (needs sessionid) ────────────────────────────────────
-  try {
-    console.log(`[scraper] Strategy 1 — GQL (shortcode: ${shortcode})`);
-    const result = await fetchViaGQL(shortcode);
-    result._source = 'gql';
-    console.log(`[scraper] ✓ GQL succeeded`);
-    return result;
-  } catch (err) {
-    console.warn(`[scraper] ✗ GQL failed: ${err.message}`);
-    errors.push(`gql: ${err.message}`);
+  // ── Strategy 1: GQL (Posts/Reels only, needs sessionid) ───────────────────
+  if (!isStory) {
+    try {
+      console.log(`[scraper] Strategy 1 — GQL (shortcode: ${identifier})`);
+      const result = await fetchViaGQL(identifier);
+      result._source = 'gql';
+      console.log(`[scraper] ✓ GQL succeeded`);
+      return result;
+    } catch (err) {
+      console.warn(`[scraper] ✗ GQL failed: ${err.message}`);
+      errors.push(`gql: ${err.message}`);
+    }
   }
 
-  // ── Strategy 2: Private Media API (needs sessionid) ───────────────────────
+  // ── Strategy 2: Private Media API (Supports Posts, Reels & Stories) ───────
   try {
-    console.log(`[scraper] Strategy 2 — MediaAPI`);
-    const result = await fetchViaMediaAPI(shortcode);
+    console.log(`[scraper] Strategy 2 — MediaAPI (${isStory ? 'Story ID' : 'Shortcode'}: ${identifier})`);
+    const result = await fetchViaMediaAPI(identifier);
     result._source = 'media_api';
     console.log(`[scraper] ✓ MediaAPI succeeded`);
     return result;
@@ -357,29 +363,33 @@ async function scrapePost(instagramUrl) {
     errors.push(`media_api: ${err.message}`);
   }
 
-  // ── Strategy 3: Embed page scrape (no auth needed) ────────────────────────
-  try {
-    console.log(`[scraper] Strategy 3 — Embed page scrape`);
-    const result = await fetchViaEmbedScrape(shortcode);
-    result._source = 'embed_scrape';
-    console.log(`[scraper] ✓ Embed scrape succeeded`);
-    return result;
-  } catch (err) {
-    console.warn(`[scraper] ✗ Embed scrape failed: ${err.message}`);
-    errors.push(`embed_scrape: ${err.message}`);
+  // ── Strategy 3: Embed page scrape (Posts/Reels only, no auth needed) ──────
+  if (!isStory) {
+    try {
+      console.log(`[scraper] Strategy 3 — Embed page scrape`);
+      const result = await fetchViaEmbedScrape(identifier);
+      result._source = 'embed_scrape';
+      console.log(`[scraper] ✓ Embed scrape succeeded`);
+      return result;
+    } catch (err) {
+      console.warn(`[scraper] ✗ Embed scrape failed: ${err.message}`);
+      errors.push(`embed_scrape: ${err.message}`);
+    }
   }
 
-  // ── Strategy 4: oEmbed (no auth, thumbnail+caption only) ─────────────────
-  try {
-    console.log(`[scraper] Strategy 4 — oEmbed (thumbnail + caption only)`);
-    const result = await fetchViaOEmbed(instagramUrl);
-    result._source      = 'oembed_fallback';
-    result._warnings    = ['oEmbed: video_url not available via this strategy'];
-    console.log(`[scraper] ✓ oEmbed succeeded (limited data)`);
-    return result;
-  } catch (err) {
-    console.warn(`[scraper] ✗ oEmbed failed: ${err.message}`);
-    errors.push(`oembed: ${err.message}`);
+  // ── Strategy 4: oEmbed (Posts/Reels only, no auth fallback) ──────────────
+  if (!isStory) {
+    try {
+      console.log(`[scraper] Strategy 4 — oEmbed (thumbnail + caption only)`);
+      const result = await fetchViaOEmbed(instagramUrl);
+      result._source      = 'oembed_fallback';
+      result._warnings    = ['oEmbed: video_url not available via this strategy'];
+      console.log(`[scraper] ✓ oEmbed succeeded (limited data)`);
+      return result;
+    } catch (err) {
+      console.warn(`[scraper] ✗ oEmbed failed: ${err.message}`);
+      errors.push(`oembed: ${err.message}`);
+    }
   }
 
   // ── All strategies exhausted ──────────────────────────────────────────────
