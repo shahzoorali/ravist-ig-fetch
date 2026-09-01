@@ -74,6 +74,18 @@ function extractShortcode(url) {
 }
 
 /**
+ * Reads the 1-based `img_index` query param from an Instagram carousel URL
+ * (e.g. .../p/ABC123/?img_index=2). Returns a positive integer, or null when
+ * absent/invalid.
+ */
+function extractImgIndex(url) {
+  const match = url.match(/[?&]img_index=(\d+)/);
+  if (!match) return null;
+  const n = parseInt(match[1], 10);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/**
  * Converts an Instagram shortcode to its numeric media ID.
  * Standard base-64 decode using Instagram's alphabet — stable algorithm.
  * If input is already numeric (like a Story ID), returns it as-is.
@@ -155,28 +167,58 @@ function hasSession() {
   return !!process.env.INSTAGRAM_SESSION_ID;
 }
 
-/** Normalises raw Instagram media object (internal API or GraphQL) → clean shape */
-function normaliseMedia(raw) {
-  const isVideo =
-    raw.media_type === 2 ||
-    raw.__typename === 'GraphVideo' ||
-    raw.__typename === 'XDTGraphVideo' ||
-    !!raw.video_url ||
-    !!raw.video_versions?.length;
+/** True when a raw media node (parent or carousel child) is a video. */
+function isVideoNode(m) {
+  return (
+    m.media_type === 2 ||
+    m.__typename === 'GraphVideo' ||
+    m.__typename === 'XDTGraphVideo' ||
+    m.is_video === true ||
+    !!m.video_url ||
+    !!m.video_versions?.length
+  );
+}
 
+/**
+ * If raw is a carousel/sidecar (media_type 8 / GraphSidecar), returns the child
+ * we actually want. When `imgIndex` (1-based, from `?img_index=`) is given and in
+ * range, that exact slide wins; otherwise the first video child, else the first
+ * child. Non-carousel nodes are returned untouched.
+ */
+function unwrapCarousel(raw, imgIndex = null) {
+  const children =
+    raw.carousel_media ??                                   // internal API
+    raw.edge_sidecar_to_children?.edges?.map(e => e.node);  // GraphQL
+  if (!children?.length) return raw;
+  if (imgIndex && imgIndex >= 1 && imgIndex <= children.length) {
+    return children[imgIndex - 1];
+  }
+  return children.find(isVideoNode) ?? children[0];
+}
+
+/** Normalises raw Instagram media object (internal API or GraphQL) → clean shape */
+function normaliseMedia(raw, imgIndex = null) {
+  // Caption and author live on the parent post, even for carousels.
   const captionText =
     raw.caption?.text ??
     raw.edge_media_to_caption?.edges?.[0]?.node?.text ??
     null;
+  const author = raw.user?.username ?? raw.owner?.username ?? null;
+
+  // For carousels, the media (image/video) lives on a child node.
+  const media = unwrapCarousel(raw, imgIndex);
+
+  const isVideo = isVideoNode(media);
 
   const imageCandidates =
-    raw.image_versions2?.candidates ??
-    raw.thumbnail_resources ??
-    (raw.display_url ? [{ url: raw.display_url, width: 1080, height: 1080 }] : []);
+    media.image_versions2?.candidates ??
+    media.thumbnail_resources ??
+    media.display_resources ??
+    (media.display_url ? [{ url: media.display_url, width: 1080, height: 1080 }] : []);
 
   const videoUrl =
-    raw.video_url ??
-    raw.video_versions?.[0]?.url ??
+    media.video_url ??
+    media.video_versions?.[0]?.url ??
     null;
 
   return {
@@ -186,7 +228,7 @@ function normaliseMedia(raw) {
     caption:       captionText,
     thumbnail_url: getBestImage(imageCandidates),
     video_url:     isVideo ? videoUrl : null,
-    author:        raw.user?.username ?? raw.owner?.username ?? null,
+    author,
   };
 }
 
@@ -196,7 +238,7 @@ function normaliseMedia(raw) {
  * Strategy 1: Instagram internal GQL endpoint.
  * Requires a valid sessionid cookie — returns full media data including .mp4.
  */
-async function fetchViaGQL(shortcode) {
+async function fetchViaGQL(shortcode, imgIndex = null) {
   if (!hasSession()) throw new Error('GQL: skipped — no INSTAGRAM_SESSION_ID in .env');
 
   const url     = `https://www.instagram.com/p/${shortcode}/?__a=1&__d=dis`;
@@ -212,14 +254,14 @@ async function fetchViaGQL(shortcode) {
     data?.data?.xdt_shortcode_media;
 
   if (!raw) throw new Error('GQL: no media object in response');
-  return normaliseMedia(raw);
+  return normaliseMedia(raw, imgIndex);
 }
 
 /**
  * Strategy 2: Instagram private media API (mobile User-Agent).
  * Requires a valid sessionid cookie — best for Reels.
  */
-async function fetchViaMediaAPI(shortcode) {
+async function fetchViaMediaAPI(shortcode, imgIndex = null) {
   if (!hasSession()) throw new Error('MediaAPI: skipped — no INSTAGRAM_SESSION_ID in .env');
 
   const mediaId = shortcodeToMediaId(shortcode);
@@ -232,7 +274,7 @@ async function fetchViaMediaAPI(shortcode) {
   const raw  = data?.items?.[0];
 
   if (!raw) throw new Error('MediaAPI: no media object in response');
-  return normaliseMedia(raw);
+  return normaliseMedia(raw, imgIndex);
 }
 
 /**
@@ -240,7 +282,7 @@ async function fetchViaMediaAPI(shortcode) {
  * Works WITHOUT auth for all public posts & reels.
  * Parses the JSON payload Instagram bakes into the embed page.
  */
-async function fetchViaEmbedScrape(shortcode) {
+async function fetchViaEmbedScrape(shortcode, imgIndex = null) {
   const url     = `https://www.instagram.com/p/${shortcode}/embed/captioned/`;
   const headers = {
     'User-Agent':
@@ -263,7 +305,7 @@ async function fetchViaEmbedScrape(shortcode) {
   if (patternA) {
     const data = safeParseJSON(patternA[1]);
     const raw  = data?.shortcode_media ?? data?.graphql?.shortcode_media;
-    if (raw) return normaliseMedia(raw);
+    if (raw) return normaliseMedia(raw, imgIndex);
   }
 
   // Pattern B: window.__instagramData = {...}
@@ -271,14 +313,14 @@ async function fetchViaEmbedScrape(shortcode) {
   if (patternB) {
     const data = safeParseJSON(patternB[1]);
     const raw  = data?.shortcode_media ?? data?.entry_data?.PostPage?.[0]?.graphql?.shortcode_media;
-    if (raw) return normaliseMedia(raw);
+    if (raw) return normaliseMedia(raw, imgIndex);
   }
 
   // Pattern C: "shortcode_media":{...} anywhere in the HTML
   const patternC = html.match(/"shortcode_media"\s*:\s*(\{[\s\S]{50,10000}?"__typename"[\s\S]*?\})\s*[,}]/);
   if (patternC) {
     const raw = safeParseJSON(patternC[1]);
-    if (raw) return normaliseMedia(raw);
+    if (raw) return normaliseMedia(raw, imgIndex);
   }
 
   // Pattern D: Extract at minimum a thumbnail from og:image meta tag
@@ -335,13 +377,18 @@ async function fetchViaOEmbed(instagramUrl) {
 async function scrapePost(instagramUrl) {
   const identifier = extractShortcode(instagramUrl);
   const isStory    = instagramUrl.includes('/stories/');
+  const imgIndex   = extractImgIndex(instagramUrl);
   const errors     = [];
+
+  if (imgIndex) {
+    console.log(`[scraper] Carousel slide requested: img_index=${imgIndex}`);
+  }
 
   // ── Strategy 1: GQL (Posts/Reels only, needs sessionid) ───────────────────
   if (!isStory) {
     try {
       console.log(`[scraper] Strategy 1 — GQL (shortcode: ${identifier})`);
-      const result = await fetchViaGQL(identifier);
+      const result = await fetchViaGQL(identifier, imgIndex);
       result._source = 'gql';
       console.log(`[scraper] ✓ GQL succeeded`);
       return result;
@@ -354,7 +401,7 @@ async function scrapePost(instagramUrl) {
   // ── Strategy 2: Private Media API (Supports Posts, Reels & Stories) ───────
   try {
     console.log(`[scraper] Strategy 2 — MediaAPI (${isStory ? 'Story ID' : 'Shortcode'}: ${identifier})`);
-    const result = await fetchViaMediaAPI(identifier);
+    const result = await fetchViaMediaAPI(identifier, imgIndex);
     result._source = 'media_api';
     console.log(`[scraper] ✓ MediaAPI succeeded`);
     return result;
@@ -367,7 +414,7 @@ async function scrapePost(instagramUrl) {
   if (!isStory) {
     try {
       console.log(`[scraper] Strategy 3 — Embed page scrape`);
-      const result = await fetchViaEmbedScrape(identifier);
+      const result = await fetchViaEmbedScrape(identifier, imgIndex);
       result._source = 'embed_scrape';
       console.log(`[scraper] ✓ Embed scrape succeeded`);
       return result;
