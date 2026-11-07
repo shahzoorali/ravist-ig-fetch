@@ -20,6 +20,7 @@ const router = express.Router();
  *       "thumbnail_url": "https://...",
  *       "video_url": "https://...mp4" | null,
  *       "author": "username",
+ *       "media": [{ "type", "thumbnail_url", "video_url" }],  // every carousel slide ([] for single posts)
  *       "_source": "graphql" | "media_api" | "oembed_fallback"
  *     }
  *   }

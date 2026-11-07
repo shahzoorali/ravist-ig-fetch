@@ -206,8 +206,29 @@ function normaliseMedia(raw, imgIndex = null) {
   const author = raw.user?.username ?? raw.owner?.username ?? null;
 
   // For carousels, the media (image/video) lives on a child node.
-  const media = unwrapCarousel(raw, imgIndex);
+  const picked = describeNode(unwrapCarousel(raw, imgIndex));
 
+  // Every carousel slide, so callers can let a human choose which one to use.
+  const children =
+    raw.carousel_media ??
+    raw.edge_sidecar_to_children?.edges?.map(e => e.node) ??
+    [];
+  const media = children.map(describeNode).filter(m => m.thumbnail_url || m.video_url);
+
+  return {
+    id:            raw.pk ?? raw.id ?? null,
+    shortcode:     raw.code ?? raw.shortcode ?? null,
+    type:          picked.type,
+    caption:       captionText,
+    thumbnail_url: picked.thumbnail_url,
+    video_url:     picked.video_url,
+    author,
+    media,
+  };
+}
+
+/** One media node (single post or carousel child) → { type, thumbnail_url, video_url } */
+function describeNode(media) {
   const isVideo = isVideoNode(media);
 
   const imageCandidates =
@@ -222,13 +243,9 @@ function normaliseMedia(raw, imgIndex = null) {
     null;
 
   return {
-    id:            raw.pk ?? raw.id ?? null,
-    shortcode:     raw.code ?? raw.shortcode ?? null,
     type:          isVideo ? 'video' : 'image',
-    caption:       captionText,
     thumbnail_url: getBestImage(imageCandidates),
     video_url:     isVideo ? videoUrl : null,
-    author,
   };
 }
 
